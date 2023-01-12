@@ -51,6 +51,7 @@ type Options struct {
 
 	Providers Providers `cfg:",internal"`
 
+	RouteGroupsFile       string   `flag:"route-groups-file" cfg:"route_groups_file"`
 	APIRoutes             []string `flag:"api-route" cfg:"api_routes"`
 	SkipAuthRegex         []string `flag:"skip-auth-regex" cfg:"skip_auth_regex"`
 	SkipAuthRoutes        []string `flag:"skip-auth-route" cfg:"skip_auth_routes"`
@@ -120,6 +121,7 @@ func NewFlagSet() *pflag.FlagSet {
 	flagSet.StringSlice("skip-auth-regex", []string{}, "(DEPRECATED for --skip-auth-route) bypass authentication for requests path's that match (may be given multiple times)")
 	flagSet.StringSlice("skip-auth-route", []string{}, "bypass authentication for requests that match the method & path. Format: method=path_regex OR method!=path_regex. For all methods: path_regex OR !=path_regex")
 	flagSet.StringSlice("api-route", []string{}, "return HTTP 401 instead of redirecting to authentication server if token is not valid. Format: path_regex")
+	flagSet.String("route-groups-file", "", "YAML file for configureing per route authorization")
 	flagSet.Bool("skip-provider-button", false, "will skip sign-in-page to directly reach the next step: oauth/start")
 	flagSet.Bool("skip-auth-preflight", false, "will skip authentication for OPTIONS requests")
 	flagSet.Bool("ssl-insecure-skip-verify", false, "skip validation of certificates presented when using HTTPS providers")

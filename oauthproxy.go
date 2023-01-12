@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ghodss/yaml"
 	"github.com/gorilla/mux"
 	"github.com/justinas/alice"
 	ipapi "github.com/oauth2-proxy/oauth2-proxy/v7/pkg/apis/ip"
@@ -67,6 +68,17 @@ type allowedRoute struct {
 	pathRegex *regexp.Regexp
 }
 
+type routeGroupsFile struct {
+	Routes []*routeGroups
+}
+
+type routeGroups struct {
+	pathRegexCompiled *regexp.Regexp
+	PathRegex         string `json:"path"`
+	Negate            bool
+	Groups            []string
+}
+
 type apiRoute struct {
 	pathRegex *regexp.Regexp
 }
@@ -80,6 +92,7 @@ type OAuthProxy struct {
 
 	allowedRoutes       []allowedRoute
 	apiRoutes           []apiRoute
+	routeGroups         []*routeGroups
 	redirectURL         *url.URL // the url to receive requests at
 	whitelistDomains    []string
 	provider            providers.Provider
@@ -175,6 +188,11 @@ func NewOAuthProxy(opts *options.Options, validator func(string) bool) (*OAuthPr
 		}
 	}
 
+	rgroups, err := buildRouteGroups(opts)
+	if err != nil {
+		return nil, err
+	}
+
 	allowedRoutes, err := buildRoutesAllowlist(opts)
 	if err != nil {
 		return nil, err
@@ -211,6 +229,7 @@ func NewOAuthProxy(opts *options.Options, validator func(string) bool) (*OAuthPr
 		provider:            provider,
 		sessionStore:        sessionStore,
 		redirectURL:         redirectURL,
+		routeGroups:         rgroups,
 		apiRoutes:           apiRoutes,
 		allowedRoutes:       allowedRoutes,
 		whitelistDomains:    opts.WhitelistDomains,
@@ -436,6 +455,33 @@ func buildProviderName(p providers.Provider, override string) string {
 	return p.Data().ProviderName
 }
 
+// buildRouteGroups builds an []routeGroups list from RouteGroupsFile option.
+func buildRouteGroups(opts *options.Options) ([]*routeGroups, error) {
+	if opts.RouteGroupsFile == "" {
+		return nil, nil
+	}
+
+	content, err := os.ReadFile(opts.RouteGroupsFile)
+	if err != nil {
+		return nil, err
+	}
+
+	var rgroups routeGroupsFile
+	err = yaml.Unmarshal(content, &rgroups)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, rgroup := range rgroups.Routes {
+		rgroup.pathRegexCompiled, err = regexp.Compile(rgroup.PathRegex)
+		if err != nil {
+			return nil, fmt.Errorf("failed to compile route regex: %w", err)
+		}
+	}
+
+	return rgroups.Routes, err
+}
+
 // buildRoutesAllowlist builds an []allowedRoute  list from either the legacy
 // SkipAuthRegex option (paths only support) or newer SkipAuthRoutes option
 // (method=path support)
@@ -571,6 +617,37 @@ func (p *OAuthProxy) isAllowedRoute(req *http.Request) bool {
 		}
 	}
 	return false
+}
+
+func (p *OAuthProxy) hasAllowedGroup(req *http.Request, session *sessionsapi.SessionState) bool {
+	rg := p.filterGroupRoute(req)
+	if rg == nil {
+		return true
+	}
+
+	for _, group := range session.Groups {
+		for _, allowedGroup := range rg.Groups {
+			if group == allowedGroup {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+func (p *OAuthProxy) filterGroupRoute(req *http.Request) *routeGroups {
+	for _, rg := range p.routeGroups {
+		matches := rg.pathRegexCompiled.MatchString(req.URL.Path)
+		if rg.Negate {
+			matches = !matches
+		}
+
+		if matches {
+			return rg
+		}
+	}
+	return nil
 }
 
 func (p *OAuthProxy) isAPIPath(req *http.Request) bool {
@@ -947,9 +1024,19 @@ func (p *OAuthProxy) Proxy(rw http.ResponseWriter, req *http.Request) {
 	session, err := p.getAuthenticatedSession(rw, req)
 	switch err {
 	case nil:
-		// we are authenticated
-		p.addHeadersForProxying(rw, session)
-		p.headersChain.Then(p.upstreamProxy).ServeHTTP(rw, req)
+		if p.hasAllowedGroup(req, session) {
+			// we are authenticated
+			p.addHeadersForProxying(rw, session)
+			p.headersChain.Then(p.upstreamProxy).ServeHTTP(rw, req)
+			return
+		}
+		fallthrough
+	case ErrAccessDenied:
+		if p.forceJSONErrors {
+			p.errorJSON(rw, http.StatusForbidden)
+		} else {
+			p.ErrorPage(rw, req, http.StatusForbidden, "The session failed authorization checks")
+		}
 	case ErrNeedsLogin:
 		// we need to send the user to a login screen
 		if p.forceJSONErrors || isAjax(req) || p.isAPIPath(req) {
@@ -967,13 +1054,6 @@ func (p *OAuthProxy) Proxy(rw http.ResponseWriter, req *http.Request) {
 			p.doOAuthStart(rw, req, nil)
 		} else {
 			p.SignInPage(rw, req, http.StatusForbidden)
-		}
-
-	case ErrAccessDenied:
-		if p.forceJSONErrors {
-			p.errorJSON(rw, http.StatusForbidden)
-		} else {
-			p.ErrorPage(rw, req, http.StatusForbidden, "The session failed authorization checks")
 		}
 
 	default:
